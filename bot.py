@@ -1,19 +1,8 @@
 """
 Telegram бот мониторинга билетов mostanet.ru — многопользовательский.
 
-Каждый пользователь независимо настраивает маршруты и даты,
+Каждый пользователь независимо настраивает маршруты и даты (per-route),
 получает личные уведомления о появлении билетов.
-
-Команды:
-  /start          — приветствие
-  /addroute       — добавить маршрут (пошаговый диалог)
-  /routes         — список маршрутов с кнопками удаления
-  /adddate        — добавить дату(ы)
-  /dates          — список дат с кнопками удаления
-  /check          — проверить прямо сейчас
-  /clearnotified  — сбросить кэш уведомлений
-  /status         — текущие настройки
-  /help           — справка
 """
 
 import asyncio
@@ -56,12 +45,36 @@ MONTHS_RU = ["Январь","Февраль","Март","Апрель","Май",
 DAYS_RU = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]
 
 
-def build_calendar(year: int, month: int, added: set[str], selected: list[str]) -> InlineKeyboardMarkup:
-    """Строит inline-клавиатуру с календарём на месяц."""
+# ══════════════════════════════════════════════════════════════════════════════
+# Календарь
+# ══════════════════════════════════════════════════════════════════════════════
+
+def build_calendar(
+    year: int,
+    month: int,
+    added: set[str],
+    selected: list[str],
+    routes: list[st.Route],
+    route_idx: int,
+) -> InlineKeyboardMarkup:
     today = date_type.today()
     rows = []
 
-    # Навигация
+    # ── Переключатель маршрутов ───────────────────────────────────────────────
+    if routes:
+        route_row = []
+        for i, r in enumerate(routes):
+            # Сокращаем название если длинное
+            name = r.label()
+            if len(name) > 20:
+                name = f"{r.from_port[:8]}→{r.to_port[:8]}"
+            label = f"► {name}" if i == route_idx else name
+            route_row.append(InlineKeyboardButton(label, callback_data=f"cal_route|{i}"))
+        # Разбиваем на строки по 2 если маршрутов больше 2
+        for i in range(0, len(route_row), 2):
+            rows.append(route_row[i:i+2])
+
+    # ── Навигация по месяцу ───────────────────────────────────────────────────
     pm, py = (month - 1, year) if month > 1 else (12, year - 1)
     nm, ny = (month + 1, year) if month < 12 else (1, year + 1)
     rows.append([
@@ -70,10 +83,10 @@ def build_calendar(year: int, month: int, added: set[str], selected: list[str]) 
         InlineKeyboardButton("▶", callback_data=f"cal_nav|{ny}|{nm}"),
     ])
 
-    # Заголовок дней
+    # ── Заголовок дней ────────────────────────────────────────────────────────
     rows.append([InlineKeyboardButton(d, callback_data="cal_noop") for d in DAYS_RU])
 
-    # Дни месяца
+    # ── Дни месяца ────────────────────────────────────────────────────────────
     for week in cal_module.monthcalendar(year, month):
         row = []
         for day in week:
@@ -81,21 +94,17 @@ def build_calendar(year: int, month: int, added: set[str], selected: list[str]) 
                 row.append(InlineKeyboardButton(" ", callback_data="cal_noop"))
                 continue
             ds = f"{year:04d}-{month:02d}-{day:02d}"
-            day_date = date_type(year, month, day)
-            if day_date < today:
-                # Прошедший день — недоступен
+            if date_type(year, month, day) < today:
                 row.append(InlineKeyboardButton(f"·{day}", callback_data="cal_noop"))
             elif ds in added:
-                # Уже добавлен — показываем, нельзя выбрать повторно
                 row.append(InlineKeyboardButton(f"✅{day}", callback_data="cal_noop"))
             elif ds in selected:
-                # Выбран в текущей сессии — нажать чтобы снять
                 row.append(InlineKeyboardButton(f"📅{day}", callback_data=f"cal_deselect|{ds}"))
             else:
                 row.append(InlineKeyboardButton(str(day), callback_data=f"cal_select|{ds}"))
         rows.append(row)
 
-    # Кнопки действий
+    # ── Кнопки действий ──────────────────────────────────────────────────────
     if selected:
         rows.append([
             InlineKeyboardButton(f"✅ Добавить ({len(selected)})", callback_data="cal_confirm"),
@@ -135,33 +144,35 @@ def format_ticket(t: Ticket) -> str:
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def check_user(user: st.UserState, notify: bool = True) -> list[Ticket]:
-    """Проверяет билеты для одного пользователя."""
-    if not user.routes or not user.dates:
+    """Проверяет билеты для всех маршрутов пользователя (per-route dates)."""
+    if not user.routes:
         return []
 
-    monitor = TicketMonitor(
-        routes=[{"from_port": r.from_port, "to_port": r.to_port} for r in user.routes]
-    )
-    try:
-        tickets = await monitor.check_all(user.dates)
-    except Exception as e:
-        logger.error(f"[user {user.chat_id}] Ошибка проверки: {e}")
-        return []
+    all_tickets: list[Ticket] = []
+    for route in user.routes:
+        dates = user.get_dates(route.key())
+        if not dates:
+            continue
+        monitor = TicketMonitor(routes=[{"from_port": route.from_port, "to_port": route.to_port}])
+        try:
+            tickets = await monitor.check_all(dates)
+            all_tickets.extend(tickets)
+            logger.info(f"[user {user.chat_id}] {route.label()}: {len(tickets)} рейсов")
+        except Exception as e:
+            logger.error(f"[user {user.chat_id}] {route.label()}: {e}")
 
-    if notify and tickets:
-        await send_notifications(user, tickets)
+    if notify and all_tickets:
+        await send_notifications(user, all_tickets)
 
-    return tickets
+    return all_tickets
 
 
 async def send_notifications(user: st.UserState, tickets: list[Ticket]) -> None:
     if not app_ref:
         return
-
     new_tickets = [t for t in tickets if not user.is_notified(t.trip_id)]
     if not new_tickets:
         return
-
     for t in new_tickets:
         user.mark_notified(t.trip_id)
 
@@ -190,9 +201,8 @@ async def send_notifications(user: st.UserState, tickets: list[Ticket]) -> None:
 
 
 async def scheduled_check() -> None:
-    """Плановая проверка для всех пользователей."""
     users = st.all_users()
-    active = [u for u in users if u.routes and u.dates]
+    active = [u for u in users if u.routes and u.all_dates()]
     if not active:
         return
     logger.info(f"Плановая проверка: {len(active)} пользователей")
@@ -205,13 +215,13 @@ async def scheduled_check() -> None:
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = st.get_user(update.effective_chat.id)
+    st.get_user(update.effective_chat.id)
     text = (
         "👋 *Бот мониторинга билетов mostanet.ru*\n\n"
         "Слежу за появлением билетов по твоим маршрутам и датам.\n"
         "Как только билеты появятся — сразу пришлю сообщение.\n\n"
         "📍 /addroute — добавить маршрут\n"
-        "📅 /adddate — добавить дату\n"
+        "📅 /adddate — выбрать даты через календарь\n"
         "🔍 /check — проверить прямо сейчас\n"
         "📊 /status — мои настройки\n"
         "❓ /help — справка"
@@ -223,41 +233,40 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "📖 *Справка*\n\n"
         "*Маршруты:*\n"
-        "/addroute — добавить маршрут\n"
-        "/routes — список маршрутов (с удалением)\n"
-        "/clearroutes — очистить все маршруты\n\n"
-        "*Даты:*\n"
-        "/adddate 2024-07-20 — добавить дату\n"
-        "/adddate +30 — ближайшие 30 дней\n"
-        "/dates — список дат (с удалением)\n"
-        "/cleardates — очистить все даты\n\n"
-        "*Прочее:*\n"
-        "/check — проверить прямо сейчас\n"
-        "/clearnotified — уведомить заново обо всех найденных\n"
-        "/status — мои настройки и статус мониторинга"
+        "/addroute — добавить маршрут (пошаговый диалог)\n"
+        "/routes — список маршрутов с кнопками удаления\n"
+        "/clearroutes — удалить все маршруты\n\n"
+        "*Даты (настраиваются отдельно для каждого маршрута):*\n"
+        "/adddate — открыть календарь:\n"
+        "   • переключай маршруты кнопками вверху\n"
+        "   • нажимай дни для выбора (можно несколько)\n"
+        "   • ✅ — уже добавлены, 📅 — выбраны, · — прошедшие\n"
+        "/dates — даты по каждому маршруту (с удалением)\n"
+        "/cleardates — удалить все даты\n\n"
+        "*Мониторинг:*\n"
+        "/check — немедленная проверка\n"
+        "/clearnotified — сбросить кэш (уведомить заново)\n"
+        "/status — маршруты, даты, статус планировщика"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = st.get_user(update.effective_chat.id)
-
-    routes_str = (
-        "\n".join(f"  {i+1}. {r.label()}" for i, r in enumerate(user.routes))
-        or "  не добавлены"
-    )
-    dates_str = (
-        "\n".join(f"  {d}" for d in user.dates[:10])
-        + (f"\n  ...и ещё {len(user.dates)-10}" if len(user.dates) > 10 else "")
-        or "  не добавлены"
-    )
     sch = "✅ работает" if scheduler and scheduler.running else "❌ остановлен"
+
+    if not user.routes:
+        routes_info = "  не добавлены"
+    else:
+        lines = []
+        for r in user.routes:
+            dates = user.get_dates(r.key())
+            lines.append(f"  {r.label()} — {len(dates)} дат")
+        routes_info = "\n".join(lines)
 
     text = (
         f"📊 *Твои настройки*\n\n"
-        f"*Маршруты:*\n{routes_str}\n\n"
-        f"*Дат в мониторинге:* {len(user.dates)}\n"
-        f"{dates_str}\n\n"
+        f"*Маршруты и даты:*\n{routes_info}\n\n"
         f"*Планировщик:* {sch}\n"
         f"*Интервал:* каждые {CHECK_INTERVAL // 60} мин.\n"
         f"*Кэш уведомлений:* {len(user.notified)} рейсов"
@@ -281,12 +290,8 @@ async def cmd_addroute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 async def route_got_from(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text.strip()
     if text == "✏️ Ввести вручную":
-        await update.message.reply_text(
-            "✏️ Напиши название порта отправления:",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        await update.message.reply_text("✏️ Напиши название порта отправления:", reply_markup=ReplyKeyboardRemove())
         return ROUTE_FROM
-
     context.user_data["from_port"] = text
     await update.message.reply_text(
         f"✅ Откуда: *{text}*\n\n📍 *Шаг 2/2 — Куда?*\n\nВыбери из списка или напиши вручную.",
@@ -299,15 +304,11 @@ async def route_got_from(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def route_got_to(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     text = update.message.text.strip()
     if text == "✏️ Ввести вручную":
-        await update.message.reply_text(
-            "✏️ Напиши название порта назначения:",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        await update.message.reply_text("✏️ Напиши название порта назначения:", reply_markup=ReplyKeyboardRemove())
         return ROUTE_TO
 
     from_port = context.user_data.get("from_port", "?")
     to_port = text
-
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("✅ Добавить", callback_data=f"route_confirm|{from_port}|{to_port}"),
         InlineKeyboardButton("❌ Отмена", callback_data="route_cancel"),
@@ -324,7 +325,6 @@ async def route_got_to(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 async def route_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
-
     if query.data == "route_cancel":
         await query.edit_message_text("❌ Добавление отменено.")
         return ConversationHandler.END
@@ -332,17 +332,14 @@ async def route_confirm_callback(update: Update, context: ContextTypes.DEFAULT_T
     _, from_port, to_port = query.data.split("|", 2)
     user = st.get_user(query.message.chat_id)
     added = user.add_route(from_port, to_port)
-
     if added:
         await query.edit_message_text(
-            f"✅ Маршрут добавлен: *{from_port} → {to_port}*\n\nВсего маршрутов: {len(user.routes)}",
+            f"✅ Маршрут добавлен: *{from_port} → {to_port}*\n\n"
+            f"Теперь добавь даты через /adddate",
             parse_mode=ParseMode.MARKDOWN,
         )
     else:
-        await query.edit_message_text(
-            f"ℹ️ Маршрут *{from_port} → {to_port}* уже есть.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await query.edit_message_text(f"ℹ️ Маршрут *{from_port} → {to_port}* уже есть.", parse_mode=ParseMode.MARKDOWN)
     return ConversationHandler.END
 
 
@@ -352,7 +349,7 @@ async def route_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# /routes — список с кнопками удаления
+# /routes
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_routes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -360,21 +357,23 @@ async def cmd_routes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not user.routes:
         await update.message.reply_text("Маршруты не добавлены.\n\nИспользуй /addroute")
         return
-
     buttons = [
         [InlineKeyboardButton(f"🗑 {r.label()}", callback_data=f"del_route|{i}")]
         for i, r in enumerate(user.routes)
     ]
-    text = "📍 *Твои маршруты:*\n\n" + "\n".join(f"{i+1}. {r.label()}" for i, r in enumerate(user.routes))
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
+    lines = [f"{i+1}. {r.label()} ({len(user.get_dates(r.key()))} дат)" for i, r in enumerate(user.routes)]
+    await update.message.reply_text(
+        "📍 *Твои маршруты:*\n\n" + "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
 async def del_route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     user = st.get_user(query.message.chat_id)
-    index = int(query.data.split("|")[1])
-    removed = user.remove_route(index)
+    removed = user.remove_route(int(query.data.split("|")[1]))
     if removed:
         await query.edit_message_text(f"🗑 Маршрут удалён: *{removed.label()}*", parse_mode=ParseMode.MARKDOWN)
     else:
@@ -382,18 +381,27 @@ async def del_route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# /adddate — календарь
+# /adddate — календарь с переключением маршрутов
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_adddate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = st.get_user(update.effective_chat.id)
-    today = datetime.now().date()
+    if not user.routes:
+        await update.message.reply_text("⚠️ Сначала добавь маршрут через /addroute")
+        return
+
+    today = date_type.today()
     context.user_data["cal_selected"] = []
-    keyboard = build_calendar(today.year, today.month, set(user.dates), [])
+    context.user_data["cal_route_idx"] = 0
+
+    route = user.routes[0]
+    added = set(user.get_dates(route.key()))
+    keyboard = build_calendar(today.year, today.month, added, [], user.routes, 0)
     await update.message.reply_text(
         "📅 *Выбери даты для мониторинга*\n\n"
-        "Нажимай на дни — можно выбрать сразу несколько.\n"
-        "✅ — уже добавлены  |  📅 — выбраны сейчас  |  · — прошедшие",
+        "Переключай маршруты кнопками вверху.\n"
+        "Нажимай на дни — можно выбрать несколько.\n"
+        "✅ — уже добавлены  |  📅 — выбраны  |  · — прошедшие",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard,
     )
@@ -405,6 +413,20 @@ async def cal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     data = query.data
     user = st.get_user(query.message.chat_id)
     selected: list[str] = context.user_data.get("cal_selected", [])
+    route_idx: int = context.user_data.get("cal_route_idx", 0)
+
+    # Защита от невалидного индекса
+    if route_idx >= len(user.routes):
+        route_idx = 0
+        context.user_data["cal_route_idx"] = 0
+
+    def current_added() -> set[str]:
+        if not user.routes:
+            return set()
+        return set(user.get_dates(user.routes[route_idx].key()))
+
+    def rebuild(y: int, m: int) -> InlineKeyboardMarkup:
+        return build_calendar(y, m, current_added(), selected, user.routes, route_idx)
 
     if data == "cal_noop":
         return
@@ -413,10 +435,20 @@ async def cal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         context.user_data["cal_selected"] = []
         await query.edit_message_text("❌ Закрыто.")
 
+    elif data.startswith("cal_route|"):
+        new_idx = int(data.split("|")[1])
+        if new_idx < len(user.routes):
+            context.user_data["cal_route_idx"] = new_idx
+            context.user_data["cal_selected"] = []  # сбрасываем выбор при смене маршрута
+            today = date_type.today()
+            kb = build_calendar(today.year, today.month,
+                                set(user.get_dates(user.routes[new_idx].key())),
+                                [], user.routes, new_idx)
+            await query.edit_message_reply_markup(reply_markup=kb)
+
     elif data.startswith("cal_nav|"):
         _, y, m = data.split("|")
-        kb = build_calendar(int(y), int(m), set(user.dates), selected)
-        await query.edit_message_reply_markup(reply_markup=kb)
+        await query.edit_message_reply_markup(reply_markup=rebuild(int(y), int(m)))
 
     elif data.startswith("cal_select|"):
         ds = data.split("|")[1]
@@ -424,8 +456,7 @@ async def cal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             selected.append(ds)
         context.user_data["cal_selected"] = selected
         y, m, _ = ds.split("-")
-        kb = build_calendar(int(y), int(m), set(user.dates), selected)
-        await query.edit_message_reply_markup(reply_markup=kb)
+        await query.edit_message_reply_markup(reply_markup=rebuild(int(y), int(m)))
 
     elif data.startswith("cal_deselect|"):
         ds = data.split("|")[1]
@@ -433,59 +464,49 @@ async def cal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             selected.remove(ds)
         context.user_data["cal_selected"] = selected
         y, m, _ = ds.split("-")
-        kb = build_calendar(int(y), int(m), set(user.dates), selected)
-        await query.edit_message_reply_markup(reply_markup=kb)
+        await query.edit_message_reply_markup(reply_markup=rebuild(int(y), int(m)))
 
     elif data == "cal_confirm":
-        new_dates = [d for d in selected if user.add_date(d)]
+        if not user.routes:
+            await query.edit_message_text("⚠️ Нет маршрутов.")
+            return
+        route = user.routes[route_idx]
+        new_dates = [d for d in selected if user.add_date(d, route.key())]
         context.user_data["cal_selected"] = []
         await query.edit_message_text(
-            f"✅ Добавлено {len(new_dates)} дат. Запускаю проверку..."
+            f"✅ Добавлено {len(new_dates)} дат для *{route.label()}*. Запускаю проверку...",
+            parse_mode=ParseMode.MARKDOWN,
         )
-        await _instant_check_after_add(query.message, user, new_dates)
+        await _instant_check(query.message, user, route, new_dates)
 
 
-async def _instant_check_after_add(message, user: st.UserState, new_dates: list[str]) -> None:
-    """Проверяет билеты сразу после добавления дат и сообщает результат."""
-    if not user.routes:
-        await message.reply_text(
-            "ℹ️ Маршруты не добавлены — добавь их через /addroute и мониторинг начнётся."
-        )
-        return
-
-    monitor = TicketMonitor(
-        routes=[{"from_port": r.from_port, "to_port": r.to_port} for r in user.routes]
-    )
+async def _instant_check(message, user: st.UserState, route: st.Route, dates: list[str]) -> None:
+    monitor = TicketMonitor(routes=[{"from_port": route.from_port, "to_port": route.to_port}])
     try:
-        tickets = await monitor.check_all(new_dates)
+        tickets = await monitor.check_all(dates)
     except Exception as e:
-        logger.error(f"Ошибка моментальной проверки: {e}")
+        logger.error(f"Ошибка проверки: {e}")
         return
 
-    # Билеты есть — показываем сразу
     if tickets:
         for t in tickets:
             user.mark_notified(t.trip_id)
-        parts = [f"🎫 *Нашёл билеты на добавленные даты!*\n"]
+        parts = [f"🎫 *Нашёл билеты!*\n"]
         for t in tickets:
             parts.append(format_ticket(t))
-        keyboard = [[InlineKeyboardButton("🎫 Купить билет", url="https://mostanet.ru")]]
         await message.reply_text(
             "\n\n".join(parts),
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎫 Купить", url="https://mostanet.ru")]]),
             disable_web_page_preview=True,
         )
     else:
-        # Билетов нет — сообщаем что следим
-        routes_str = ", ".join(r.label() for r in user.routes)
         await message.reply_text(
-            f"😔 На добавленные даты билетов пока нет.\n\n"
-            f"👁 Слежу за: {routes_str}\n"
-            f"⏱ Проверяю каждые {CHECK_INTERVAL // 60} мин. — пришлю как появятся."
+            f"😔 На выбранные даты билетов пока нет.\n\n"
+            f"👁 Слежу за: *{route.label()}*\n"
+            f"⏱ Проверяю каждые {CHECK_INTERVAL // 60} мин. — пришлю как появятся.",
+            parse_mode=ParseMode.MARKDOWN,
         )
-
-
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -494,26 +515,50 @@ async def _instant_check_after_add(message, user: st.UserState, new_dates: list[
 
 async def cmd_dates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = st.get_user(update.effective_chat.id)
-    if not user.dates:
+    if not user.routes:
+        await update.message.reply_text("Маршруты не добавлены.\n\nИспользуй /addroute")
+        return
+
+    has_dates = any(user.get_dates(r.key()) for r in user.routes)
+    if not has_dates:
         await update.message.reply_text("Даты не добавлены.\n\nИспользуй /adddate")
         return
 
-    dates_to_show = user.dates[:30]
-    buttons = [[InlineKeyboardButton(f"🗑 {d}", callback_data=f"del_date|{d}")] for d in dates_to_show]
-    if len(user.dates) > 30:
-        buttons.append([InlineKeyboardButton(f"...и ещё {len(user.dates)-30}", callback_data="noop")])
+    buttons = []
+    text_lines = ["📅 *Даты по маршрутам:*\n"]
 
-    text = f"📅 *Даты мониторинга* ({len(user.dates)} шт.):\n\n" + "\n".join(dates_to_show)
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
+    for r in user.routes:
+        dates = user.get_dates(r.key())
+        if not dates:
+            text_lines.append(f"🚢 *{r.label()}* — нет дат")
+            continue
+        text_lines.append(f"🚢 *{r.label()}* ({len(dates)} дат):")
+        for d in dates[:10]:
+            text_lines.append(f"  {d}")
+            buttons.append([InlineKeyboardButton(
+                f"🗑 {r.from_port[:8]}→{r.to_port[:8]}: {d}",
+                callback_data=f"del_date|{r.key()}|{d}"
+            )])
+        if len(dates) > 10:
+            text_lines.append(f"  ...и ещё {len(dates)-10}")
+        text_lines.append("")
+
+    await update.message.reply_text(
+        "\n".join(text_lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+    )
 
 
 async def del_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     user = st.get_user(query.message.chat_id)
-    date = query.data.split("|")[1]
-    if user.remove_date(date):
-        await query.edit_message_text(f"🗑 Дата удалена: *{date}*", parse_mode=ParseMode.MARKDOWN)
+    _, route_key, date = query.data.split("|", 2)
+    if user.remove_date(date, route_key):
+        route = next((r for r in user.routes if r.key() == route_key), None)
+        label = route.label() if route else route_key
+        await query.edit_message_text(f"🗑 Удалено: *{date}* ({label})", parse_mode=ParseMode.MARKDOWN)
     else:
         await query.edit_message_text("⚠️ Дата не найдена.")
 
@@ -524,16 +569,17 @@ async def del_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = st.get_user(update.effective_chat.id)
-
     if not user.routes:
         await update.message.reply_text("⚠️ Маршруты не добавлены.\nИспользуй /addroute")
         return
-    if not user.dates:
+    if not user.all_dates():
         await update.message.reply_text("⚠️ Даты не добавлены.\nИспользуй /adddate")
         return
 
+    routes_with_dates = [r for r in user.routes if user.get_dates(r.key())]
+    total_dates = sum(len(user.get_dates(r.key())) for r in routes_with_dates)
     msg = await update.message.reply_text(
-        f"🔍 Проверяю {len(user.routes)} маршрут(а) × {len(user.dates)} дат..."
+        f"🔍 Проверяю {len(routes_with_dates)} маршрут(а), {total_dates} дат..."
     )
 
     tickets = await check_user(user, notify=False)
@@ -556,50 +602,46 @@ async def cmd_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     parts = [f"✅ *Найдено {len(new_tickets)} рейсов:*\n"]
     for t in new_tickets:
         parts.append(format_ticket(t))
-
-    keyboard = [[InlineKeyboardButton("🎫 Купить билет", url="https://mostanet.ru")]]
     await msg.edit_text(
         "\n\n".join(parts),
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎫 Купить билет", url="https://mostanet.ru")]]),
         disable_web_page_preview=True,
     )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# /clearnotified
+# Очистка
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_clearnotified(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = st.get_user(update.effective_chat.id)
     count = len(user.notified)
     user.clear_notified()
-    await update.message.reply_text(
-        f"✅ Кэш сброшен ({count} записей).\nПри следующей проверке уведомлю заново."
-    )
+    await update.message.reply_text(f"✅ Кэш сброшен ({count} записей). При следующей проверке уведомлю заново.")
 
 
 async def cmd_cleardates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = st.get_user(update.effective_chat.id)
-    count = len(user.dates)
-    if count == 0:
-        await update.message.reply_text("Список дат уже пуст.")
-        return
-    user.dates.clear()
-    user.clear_notified()
-    import state as _st; _st.save()
-    await update.message.reply_text(f"✅ Удалено {count} дат. Список очищен.")
+    count = user.clear_dates()
+    await update.message.reply_text(f"✅ Удалено {count} дат по всем маршрутам.")
 
 
 async def cmd_clearroutes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = st.get_user(update.effective_chat.id)
     count = len(user.routes)
-    if count == 0:
+    if not count:
         await update.message.reply_text("Список маршрутов уже пуст.")
         return
     user.routes.clear()
-    import state as _st; _st.save()
-    await update.message.reply_text(f"✅ Удалено {count} маршрутов. Список очищен.")
+    user.route_dates.clear()
+    st.save()
+    await update.message.reply_text(f"✅ Удалено {count} маршрутов.")
+
+
+async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    await update.message.reply_text(f"💬 Chat ID: `{chat.id}`", parse_mode=ParseMode.MARKDOWN)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -637,9 +679,9 @@ def main() -> None:
     addroute_conv = ConversationHandler(
         entry_points=[CommandHandler("addroute", cmd_addroute)],
         states={
-            ROUTE_FROM:   [MessageHandler(filters.TEXT & ~filters.COMMAND, route_got_from)],
-            ROUTE_TO:     [MessageHandler(filters.TEXT & ~filters.COMMAND, route_got_to)],
-            ROUTE_CONFIRM:[CallbackQueryHandler(route_confirm_callback, pattern=r"^route_")],
+            ROUTE_FROM:    [MessageHandler(filters.TEXT & ~filters.COMMAND, route_got_from)],
+            ROUTE_TO:      [MessageHandler(filters.TEXT & ~filters.COMMAND, route_got_to)],
+            ROUTE_CONFIRM: [CallbackQueryHandler(route_confirm_callback, pattern=r"^route_")],
         },
         fallbacks=[CommandHandler("cancel", route_cancel)],
         allow_reentry=True,
@@ -654,12 +696,13 @@ def main() -> None:
     app.add_handler(CommandHandler("dates",         cmd_dates))
     app.add_handler(CommandHandler("check",         cmd_check))
     app.add_handler(CommandHandler("clearnotified", cmd_clearnotified))
-    app.add_handler(CommandHandler("cleardates",   cmd_cleardates))
-    app.add_handler(CommandHandler("clearroutes",  cmd_clearroutes))
+    app.add_handler(CommandHandler("cleardates",    cmd_cleardates))
+    app.add_handler(CommandHandler("clearroutes",   cmd_clearroutes))
+    app.add_handler(CommandHandler("myid",          cmd_myid))
 
     app.add_handler(CallbackQueryHandler(del_route_callback, pattern=r"^del_route\|"))
-    app.add_handler(CallbackQueryHandler(del_date_callback, pattern=r"^del_date\|"))
-    app.add_handler(CallbackQueryHandler(cal_callback,      pattern=r"^cal_"))
+    app.add_handler(CallbackQueryHandler(del_date_callback,  pattern=r"^del_date\|"))
+    app.add_handler(CallbackQueryHandler(cal_callback,       pattern=r"^cal_"))
     app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern=r"^noop$"))
 
     start_scheduler(app)

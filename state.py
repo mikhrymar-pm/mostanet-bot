@@ -1,5 +1,6 @@
 """
-Хранилище состояния — каждый пользователь имеет свои маршруты, даты и кэш уведомлений.
+Хранилище состояния — каждый пользователь имеет свои маршруты.
+Даты хранятся отдельно для каждого маршрута.
 Сохраняется в state.json.
 """
 
@@ -7,8 +8,6 @@ import json
 import os
 from dataclasses import dataclass, field
 
-# Если папка /data существует (Railway Volume) — используем её.
-# Иначе сохраняем рядом со скриптом (локальный запуск).
 _DATA_DIR = "/data" if os.path.isdir("/data") else os.path.dirname(__file__)
 STATE_FILE = os.path.join(_DATA_DIR, "state.json")
 
@@ -22,14 +21,14 @@ class Route:
         return f"{self.from_port} → {self.to_port}"
 
     def key(self) -> str:
-        return f"{self.from_port}|{self.to_port}"
+        return f"{self.from_port}||{self.to_port}"
 
 
 @dataclass
 class UserState:
     chat_id: int
     routes: list[Route] = field(default_factory=list)
-    dates: list[str] = field(default_factory=list)
+    route_dates: dict[str, list[str]] = field(default_factory=dict)  # route.key() → [dates]
     notified: list[str] = field(default_factory=list)
 
     # ── Маршруты ──────────────────────────────────────────────────────────────
@@ -45,26 +44,47 @@ class UserState:
     def remove_route(self, index: int) -> Route | None:
         if 0 <= index < len(self.routes):
             r = self.routes.pop(index)
+            self.route_dates.pop(r.key(), None)
             save()
             return r
         return None
 
-    # ── Даты ──────────────────────────────────────────────────────────────────
+    # ── Даты (per-route) ──────────────────────────────────────────────────────
 
-    def add_date(self, date: str) -> bool:
-        if date in self.dates:
+    def get_dates(self, route_key: str) -> list[str]:
+        return list(self.route_dates.get(route_key, []))
+
+    def all_dates(self) -> list[str]:
+        """Все уникальные даты по всем маршрутам."""
+        return sorted(set(d for dl in self.route_dates.values() for d in dl))
+
+    def add_date(self, date: str, route_key: str) -> bool:
+        dates = self.route_dates.setdefault(route_key, [])
+        if date in dates:
             return False
-        self.dates.append(date)
-        self.dates.sort()
+        dates.append(date)
+        dates.sort()
         save()
         return True
 
-    def remove_date(self, date: str) -> bool:
-        if date in self.dates:
-            self.dates.remove(date)
+    def remove_date(self, date: str, route_key: str) -> bool:
+        dates = self.route_dates.get(route_key, [])
+        if date in dates:
+            dates.remove(date)
             save()
             return True
         return False
+
+    def clear_dates(self, route_key: str | None = None) -> int:
+        """Очищает даты — для конкретного маршрута или всех."""
+        if route_key:
+            count = len(self.route_dates.get(route_key, []))
+            self.route_dates.pop(route_key, None)
+        else:
+            count = sum(len(v) for v in self.route_dates.values())
+            self.route_dates.clear()
+        save()
+        return count
 
     # ── Кэш уведомлений ───────────────────────────────────────────────────────
 
@@ -86,27 +106,32 @@ class UserState:
         return {
             "chat_id": self.chat_id,
             "routes": [{"from_port": r.from_port, "to_port": r.to_port} for r in self.routes],
-            "dates": self.dates,
+            "route_dates": self.route_dates,
             "notified": self.notified,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "UserState":
-        return cls(
+        state = cls(
             chat_id=data["chat_id"],
             routes=[Route(**r) for r in data.get("routes", [])],
-            dates=data.get("dates", []),
+            route_dates=data.get("route_dates", {}),
             notified=data.get("notified", []),
         )
+        # Миграция старого формата (глобальные dates → per-route)
+        old_dates = data.get("dates", [])
+        if old_dates and not state.route_dates and state.routes:
+            for r in state.routes:
+                state.route_dates[r.key()] = list(old_dates)
+        return state
 
 
-# ── Глобальное хранилище всех пользователей ───────────────────────────────────
+# ── Глобальное хранилище ──────────────────────────────────────────────────────
 
 _users: dict[int, UserState] = {}
 
 
 def get_user(chat_id: int) -> UserState:
-    """Возвращает состояние пользователя, создаёт если нет."""
     if chat_id not in _users:
         _users[chat_id] = UserState(chat_id=chat_id)
         save()
@@ -141,5 +166,4 @@ def save() -> None:
         )
 
 
-# Загружаем при импорте
 load()
