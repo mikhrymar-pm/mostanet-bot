@@ -7,7 +7,8 @@ import json
 import os
 from dataclasses import dataclass, field
 
-STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
+_DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(__file__))
+STATE_FILE = os.path.join(_DATA_DIR, "state.json")
 
 
 @dataclass
