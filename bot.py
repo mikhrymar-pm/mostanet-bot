@@ -151,16 +151,16 @@ async def scheduled_check() -> None:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = st.get_user(update.effective_chat.id)
     text = (
-        "👋 *Бот мониторинга билетов mostanet\\.ru*\n\n"
-        "Слежу за появлением билетов по твоим маршрутам и датам\\.\n"
-        "Как только билеты появятся — сразу пришлю сообщение\\.\n\n"
+        "👋 *Бот мониторинга билетов mostanet.ru*\n\n"
+        "Слежу за появлением билетов по твоим маршрутам и датам.\n"
+        "Как только билеты появятся — сразу пришлю сообщение.\n\n"
         "📍 /addroute — добавить маршрут\n"
         "📅 /adddate — добавить дату\n"
         "🔍 /check — проверить прямо сейчас\n"
         "📊 /status — мои настройки\n"
         "❓ /help — справка"
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -168,19 +168,19 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📖 *Справка*\n\n"
         "*Маршруты:*\n"
         "/addroute — добавить маршрут\n"
-        "/routes — список маршрутов \\(с удалением\\)\n\n"
+        "/routes — список маршрутов (с удалением)\n"
+        "/clearroutes — очистить все маршруты\n\n"
         "*Даты:*\n"
-        "/adddate 2024\\-07\\-20 — добавить дату\n"
-        "/adddate \\+30 — ближайшие 30 дней\n"
-        "/dates — список дат \\(с удалением\\)\n\n"
+        "/adddate 2024-07-20 — добавить дату\n"
+        "/adddate +30 — ближайшие 30 дней\n"
+        "/dates — список дат (с удалением)\n"
+        "/cleardates — очистить все даты\n\n"
         "*Прочее:*\n"
         "/check — проверить прямо сейчас\n"
-        "/cleardates — очистить все даты\n"
-        "/clearroutes — очистить все маршруты\n"
         "/clearnotified — уведомить заново обо всех найденных\n"
         "/status — мои настройки и статус мониторинга"
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -203,10 +203,10 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         f"*Дат в мониторинге:* {len(user.dates)}\n"
         f"{dates_str}\n\n"
         f"*Планировщик:* {sch}\n"
-        f"*Интервал:* каждые {CHECK_INTERVAL // 60} мин\\.\n"
+        f"*Интервал:* каждые {CHECK_INTERVAL // 60} мин.\n"
         f"*Кэш уведомлений:* {len(user.notified)} рейсов"
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
