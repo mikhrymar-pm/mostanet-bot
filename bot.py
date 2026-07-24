@@ -17,9 +17,10 @@ Telegram бот мониторинга билетов mostanet.ru — много
 """
 
 import asyncio
+import calendar as cal_module
 import logging
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date as date_type
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -49,6 +50,61 @@ scheduler: AsyncIOScheduler | None = None
 app_ref: Application | None = None
 
 ROUTE_FROM, ROUTE_TO, ROUTE_CONFIRM = range(3)
+
+MONTHS_RU = ["Январь","Февраль","Март","Апрель","Май","Июнь",
+             "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"]
+DAYS_RU = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]
+
+
+def build_calendar(year: int, month: int, added: set[str], selected: list[str]) -> InlineKeyboardMarkup:
+    """Строит inline-клавиатуру с календарём на месяц."""
+    today = date_type.today()
+    rows = []
+
+    # Навигация
+    pm, py = (month - 1, year) if month > 1 else (12, year - 1)
+    nm, ny = (month + 1, year) if month < 12 else (1, year + 1)
+    rows.append([
+        InlineKeyboardButton("◀", callback_data=f"cal_nav|{py}|{pm}"),
+        InlineKeyboardButton(f"{MONTHS_RU[month-1]} {year}", callback_data="cal_noop"),
+        InlineKeyboardButton("▶", callback_data=f"cal_nav|{ny}|{nm}"),
+    ])
+
+    # Заголовок дней
+    rows.append([InlineKeyboardButton(d, callback_data="cal_noop") for d in DAYS_RU])
+
+    # Дни месяца
+    for week in cal_module.monthcalendar(year, month):
+        row = []
+        for day in week:
+            if day == 0:
+                row.append(InlineKeyboardButton(" ", callback_data="cal_noop"))
+                continue
+            ds = f"{year:04d}-{month:02d}-{day:02d}"
+            day_date = date_type(year, month, day)
+            if day_date < today:
+                # Прошедший день — недоступен
+                row.append(InlineKeyboardButton(f"·{day}", callback_data="cal_noop"))
+            elif ds in added:
+                # Уже добавлен — показываем, нельзя выбрать повторно
+                row.append(InlineKeyboardButton(f"✅{day}", callback_data="cal_noop"))
+            elif ds in selected:
+                # Выбран в текущей сессии — нажать чтобы снять
+                row.append(InlineKeyboardButton(f"📅{day}", callback_data=f"cal_deselect|{ds}"))
+            else:
+                row.append(InlineKeyboardButton(str(day), callback_data=f"cal_select|{ds}"))
+        rows.append(row)
+
+    # Кнопки действий
+    if selected:
+        rows.append([
+            InlineKeyboardButton(f"✅ Добавить ({len(selected)})", callback_data="cal_confirm"),
+            InlineKeyboardButton("❌ Отмена", callback_data="cal_cancel"),
+        ])
+    else:
+        rows.append([InlineKeyboardButton("❌ Закрыть", callback_data="cal_cancel")])
+
+    return InlineKeyboardMarkup(rows)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -326,63 +382,67 @@ async def del_route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# /adddate
+# /adddate — календарь
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def cmd_adddate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    args = context.args
-    if args:
-        await _process_date_arg(update, args[0], st.get_user(update.effective_chat.id))
-        return
-
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("+7 дней", callback_data="adddate|+7"),
-         InlineKeyboardButton("+14 дней", callback_data="adddate|+14")],
-        [InlineKeyboardButton("+30 дней", callback_data="adddate|+30"),
-         InlineKeyboardButton("+60 дней", callback_data="adddate|+60")],
-        [InlineKeyboardButton("✏️ Указать дату вручную", callback_data="adddate|manual")],
-    ])
+    user = st.get_user(update.effective_chat.id)
+    today = datetime.now().date()
+    context.user_data["cal_selected"] = []
+    keyboard = build_calendar(today.year, today.month, set(user.dates), [])
     await update.message.reply_text(
-        "📅 *Добавить даты мониторинга*\n\nВыбери вариант или укажи конкретную дату:",
+        "📅 *Выбери даты для мониторинга*\n\n"
+        "Нажимай на дни — можно выбрать сразу несколько.\n"
+        "✅ — уже добавлены  |  📅 — выбраны сейчас  |  · — прошедшие",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=keyboard,
     )
 
 
-async def adddate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    arg = query.data.split("|")[1]
+    data = query.data
     user = st.get_user(query.message.chat_id)
+    selected: list[str] = context.user_data.get("cal_selected", [])
 
-    if arg == "manual":
+    if data == "cal_noop":
+        return
+
+    elif data == "cal_cancel":
+        context.user_data["cal_selected"] = []
+        await query.edit_message_text("❌ Закрыто.")
+
+    elif data.startswith("cal_nav|"):
+        _, y, m = data.split("|")
+        kb = build_calendar(int(y), int(m), set(user.dates), selected)
+        await query.edit_message_reply_markup(reply_markup=kb)
+
+    elif data.startswith("cal_select|"):
+        ds = data.split("|")[1]
+        if ds not in selected:
+            selected.append(ds)
+        context.user_data["cal_selected"] = selected
+        y, m, _ = ds.split("-")
+        kb = build_calendar(int(y), int(m), set(user.dates), selected)
+        await query.edit_message_reply_markup(reply_markup=kb)
+
+    elif data.startswith("cal_deselect|"):
+        ds = data.split("|")[1]
+        if ds in selected:
+            selected.remove(ds)
+        context.user_data["cal_selected"] = selected
+        y, m, _ = ds.split("-")
+        kb = build_calendar(int(y), int(m), set(user.dates), selected)
+        await query.edit_message_reply_markup(reply_markup=kb)
+
+    elif data == "cal_confirm":
+        new_dates = [d for d in selected if user.add_date(d)]
+        context.user_data["cal_selected"] = []
         await query.edit_message_text(
-            "✏️ Отправь дату в формате *ГГГГ-ММ-ДД*\n\nПример: `2024-07-20`",
-            parse_mode=ParseMode.MARKDOWN,
+            f"✅ Добавлено {len(new_dates)} дат. Запускаю проверку..."
         )
-        context.user_data["awaiting_date"] = True
-        return
-
-    n = int(arg[1:])
-    today = datetime.now().date()
-    new_dates = []
-    for i in range(n):
-        d = (today + timedelta(days=i)).strftime("%Y-%m-%d")
-        if user.add_date(d):
-            new_dates.append(d)
-
-    await query.edit_message_text(
-        f"✅ Добавлено {len(new_dates)} дат. Запускаю проверку..."
-    )
-    await _instant_check_after_add(query.message, user, new_dates)
-
-
-async def handle_date_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.user_data.get("awaiting_date"):
-        return
-    context.user_data.pop("awaiting_date")
-    user = st.get_user(update.effective_chat.id)
-    await _process_date_arg(update, update.message.text.strip(), user)
+        await _instant_check_after_add(query.message, user, new_dates)
 
 
 async def _instant_check_after_add(message, user: st.UserState, new_dates: list[str]) -> None:
@@ -426,35 +486,6 @@ async def _instant_check_after_add(message, user: st.UserState, new_dates: list[
         )
 
 
-async def _process_date_arg(update: Update, arg: str, user: st.UserState) -> None:
-    if arg.startswith("+"):
-        try:
-            n = int(arg[1:])
-            today = datetime.now().date()
-            new_dates = []
-            for i in range(n):
-                d = (today + timedelta(days=i)).strftime("%Y-%m-%d")
-                if user.add_date(d):
-                    new_dates.append(d)
-            await update.message.reply_text(
-                f"✅ Добавлено {len(new_dates)} дат. Запускаю проверку..."
-            )
-            await _instant_check_after_add(update.message, user, new_dates)
-        except ValueError:
-            await update.message.reply_text("❌ Неверный формат. Пример: `/adddate +7`", parse_mode=ParseMode.MARKDOWN)
-    else:
-        try:
-            datetime.strptime(arg, "%Y-%m-%d")
-            if user.add_date(arg):
-                await update.message.reply_text(
-                    f"✅ Дата добавлена: *{arg}*. Запускаю проверку...",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-                await _instant_check_after_add(update.message, user, [arg])
-            else:
-                await update.message.reply_text(f"ℹ️ Дата {arg} уже есть.")
-        except ValueError:
-            await update.message.reply_text("❌ Формат: `ГГГГ-ММ-ДД`\nПример: `/adddate 2024-07-20`", parse_mode=ParseMode.MARKDOWN)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -627,10 +658,9 @@ def main() -> None:
     app.add_handler(CommandHandler("clearroutes",  cmd_clearroutes))
 
     app.add_handler(CallbackQueryHandler(del_route_callback, pattern=r"^del_route\|"))
-    app.add_handler(CallbackQueryHandler(del_date_callback,  pattern=r"^del_date\|"))
-    app.add_handler(CallbackQueryHandler(adddate_callback,   pattern=r"^adddate\|"))
+    app.add_handler(CallbackQueryHandler(del_date_callback, pattern=r"^del_date\|"))
+    app.add_handler(CallbackQueryHandler(cal_callback,      pattern=r"^cal_"))
     app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern=r"^noop$"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_date_text))
 
     start_scheduler(app)
     logger.info("Бот запущен (многопользовательский режим).")
