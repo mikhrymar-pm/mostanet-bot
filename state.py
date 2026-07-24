@@ -131,6 +131,7 @@ def load() -> None:
 
 
 def save() -> None:
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(
             {"users": {str(cid): u.to_dict() for cid, u in _users.items()}},
