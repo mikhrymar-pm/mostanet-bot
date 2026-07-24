@@ -175,6 +175,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/dates — список дат \\(с удалением\\)\n\n"
         "*Прочее:*\n"
         "/check — проверить прямо сейчас\n"
+        "/cleardates — очистить все даты\n"
+        "/clearroutes — очистить все маршруты\n"
         "/clearnotified — уведомить заново обо всех найденных\n"
         "/status — мои настройки и статус мониторинга"
     )
@@ -486,6 +488,29 @@ async def cmd_clearnotified(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
+async def cmd_cleardates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = st.get_user(update.effective_chat.id)
+    count = len(user.dates)
+    if count == 0:
+        await update.message.reply_text("Список дат уже пуст.")
+        return
+    user.dates.clear()
+    user.clear_notified()
+    import state as _st; _st.save()
+    await update.message.reply_text(f"✅ Удалено {count} дат. Список очищен.")
+
+
+async def cmd_clearroutes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = st.get_user(update.effective_chat.id)
+    count = len(user.routes)
+    if count == 0:
+        await update.message.reply_text("Список маршрутов уже пуст.")
+        return
+    user.routes.clear()
+    import state as _st; _st.save()
+    await update.message.reply_text(f"✅ Удалено {count} маршрутов. Список очищен.")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Планировщик
 # ══════════════════════════════════════════════════════════════════════════════
@@ -538,6 +563,8 @@ def main() -> None:
     app.add_handler(CommandHandler("dates",         cmd_dates))
     app.add_handler(CommandHandler("check",         cmd_check))
     app.add_handler(CommandHandler("clearnotified", cmd_clearnotified))
+    app.add_handler(CommandHandler("cleardates",   cmd_cleardates))
+    app.add_handler(CommandHandler("clearroutes",  cmd_clearroutes))
 
     app.add_handler(CallbackQueryHandler(del_route_callback, pattern=r"^del_route\|"))
     app.add_handler(CallbackQueryHandler(del_date_callback,  pattern=r"^del_date\|"))
