@@ -365,8 +365,16 @@ async def adddate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     n = int(arg[1:])
     today = datetime.now().date()
-    added = sum(1 for i in range(n) if user.add_date((today + timedelta(days=i)).strftime("%Y-%m-%d")))
-    await query.edit_message_text(f"✅ Добавлено {added} дат.\nВсего дат: {len(user.dates)}")
+    new_dates = []
+    for i in range(n):
+        d = (today + timedelta(days=i)).strftime("%Y-%m-%d")
+        if user.add_date(d):
+            new_dates.append(d)
+
+    await query.edit_message_text(
+        f"✅ Добавлено {len(new_dates)} дат. Запускаю проверку..."
+    )
+    await _instant_check_after_add(query.message, user, new_dates)
 
 
 async def handle_date_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -377,20 +385,72 @@ async def handle_date_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await _process_date_arg(update, update.message.text.strip(), user)
 
 
+async def _instant_check_after_add(message, user: st.UserState, new_dates: list[str]) -> None:
+    """Проверяет билеты сразу после добавления дат и сообщает результат."""
+    if not user.routes:
+        await message.reply_text(
+            "ℹ️ Маршруты не добавлены — добавь их через /addroute и мониторинг начнётся."
+        )
+        return
+
+    monitor = TicketMonitor(
+        routes=[{"from_port": r.from_port, "to_port": r.to_port} for r in user.routes]
+    )
+    try:
+        tickets = await monitor.check_all(new_dates)
+    except Exception as e:
+        logger.error(f"Ошибка моментальной проверки: {e}")
+        return
+
+    # Билеты есть — показываем сразу
+    if tickets:
+        for t in tickets:
+            user.mark_notified(t.trip_id)
+        parts = [f"🎫 *Нашёл билеты на добавленные даты!*\n"]
+        for t in tickets:
+            parts.append(format_ticket(t))
+        keyboard = [[InlineKeyboardButton("🎫 Купить билет", url="https://mostanet.ru")]]
+        await message.reply_text(
+            "\n\n".join(parts),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True,
+        )
+    else:
+        # Билетов нет — сообщаем что следим
+        routes_str = ", ".join(r.label() for r in user.routes)
+        await message.reply_text(
+            f"😔 На добавленные даты билетов пока нет.\n\n"
+            f"👁 Слежу за: {routes_str}\n"
+            f"⏱ Проверяю каждые {CHECK_INTERVAL // 60} мин. — пришлю как появятся."
+        )
+
+
 async def _process_date_arg(update: Update, arg: str, user: st.UserState) -> None:
     if arg.startswith("+"):
         try:
             n = int(arg[1:])
             today = datetime.now().date()
-            added = sum(1 for i in range(n) if user.add_date((today + timedelta(days=i)).strftime("%Y-%m-%d")))
-            await update.message.reply_text(f"✅ Добавлено {added} дат.\nВсего дат: {len(user.dates)}")
+            new_dates = []
+            for i in range(n):
+                d = (today + timedelta(days=i)).strftime("%Y-%m-%d")
+                if user.add_date(d):
+                    new_dates.append(d)
+            await update.message.reply_text(
+                f"✅ Добавлено {len(new_dates)} дат. Запускаю проверку..."
+            )
+            await _instant_check_after_add(update.message, user, new_dates)
         except ValueError:
             await update.message.reply_text("❌ Неверный формат. Пример: `/adddate +7`", parse_mode=ParseMode.MARKDOWN)
     else:
         try:
             datetime.strptime(arg, "%Y-%m-%d")
             if user.add_date(arg):
-                await update.message.reply_text(f"✅ Дата добавлена: *{arg}*\nВсего дат: {len(user.dates)}", parse_mode=ParseMode.MARKDOWN)
+                await update.message.reply_text(
+                    f"✅ Дата добавлена: *{arg}*. Запускаю проверку...",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                await _instant_check_after_add(update.message, user, [arg])
             else:
                 await update.message.reply_text(f"ℹ️ Дата {arg} уже есть.")
         except ValueError:
