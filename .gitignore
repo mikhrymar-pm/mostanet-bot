@@ -1,0 +1,8 @@
+.env
+state.json
+bot.log
+captured_api.json
+__pycache__/
+*.pyc
+.venv/
+venv/
