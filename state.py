@@ -7,7 +7,9 @@ import json
 import os
 from dataclasses import dataclass, field
 
-_DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(__file__))
+# Если папка /data существует (Railway Volume) — используем её.
+# Иначе сохраняем рядом со скриптом (локальный запуск).
+_DATA_DIR = "/data" if os.path.isdir("/data") else os.path.dirname(__file__)
 STATE_FILE = os.path.join(_DATA_DIR, "state.json")
 
 
